@@ -54,3 +54,25 @@ This work is part of a university group internship course in collaboration with 
 
 ## Notes
 This repository contains work related to the Cacheconomy project. Some datasets and details may be restricted due to project scope and data privacy considerations.
+
+---
+
+## Environment Variables (.env)
+
+Create a `.env` file in the project root with the following variables:
+
+```
+SUPABASE_URL=your_supabase_project_url
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_secret
+SUPABASE_TABLE=your_table_name
+SUPABASE_PAGE_SIZE=1000
+SUPABASE_MAX_PAGES=3
+```
+
+- `SUPABASE_URL`: Your Supabase project URL.
+- `SUPABASE_SERVICE_ROLE_KEY`: Service role secret key (for admin/server-side scripts only).
+- `SUPABASE_TABLE`: The table to query.
+- `SUPABASE_PAGE_SIZE`: Number of rows to fetch per page (for pagination).
+- `SUPABASE_MAX_PAGES`: Maximum number of pages to fetch in one run.
+
+**Never commit your .env file or secret keys to version control.**
