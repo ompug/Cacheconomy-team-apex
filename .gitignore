@@ -2,3 +2,10 @@
 
 .data
 
+duplicate_summary.txt
+merge_report.txt
+merged_data.csv
+fetched_data_sample.csv
+SESSION_NOTES.md
+
+venv/
