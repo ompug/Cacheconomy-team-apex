@@ -2,6 +2,9 @@
 
 .data
 
+__pycache__/
+*.py[cod]
+
 duplicate_summary.txt
 merge_report.txt
 merged_data.csv

@@ -144,7 +144,7 @@ def merge_all_duplicates(df: pd.DataFrame, match_fields: List[str],
 
     # Get non-duplicate rows (will be kept as-is)
     non_dup_mask = ~df.index.isin(duplicates.index)
-    result_rows = [df.loc[non_dup_mask]]
+    result_rows = df.loc[non_dup_mask].to_dict(orient='records')
     merge_reports = []
 
     # Process each duplicate group
@@ -164,9 +164,7 @@ def merge_all_duplicates(df: pd.DataFrame, match_fields: List[str],
             merge_info['group_id'] = group_id
             merge_reports.append(merge_info)
 
-            # Convert series to single-row DataFrame
-            merged_row_df = pd.DataFrame([merged_row])
-            result_rows.append(merged_row_df)
+            result_rows.append(merged_row.to_dict())
         except Exception as e:
             print(f"Error processing group {group_id}: {e}")
             print(f"Group size: {len(group_df)}")
@@ -176,12 +174,10 @@ def merge_all_duplicates(df: pd.DataFrame, match_fields: List[str],
         if (i + 1) % 10000 == 0:
             print(f"Processed {i+1:,} / {total_groups:,} groups ({(i+1)/total_groups*100:.1f}%)")
 
-    # Combine all rows
-    result_df = pd.concat(result_rows, ignore_index=True)
-
-    # Remove the duplicate_group column if it exists
-    if 'duplicate_group' in result_df.columns:
-        result_df = result_df.drop(columns=['duplicate_group'])
+    # Combine rows once at the end to avoid concatenating hundreds of thousands
+    # of tiny DataFrames during large Supabase runs.
+    result_df = pd.DataFrame(result_rows)
+    result_df = result_df.reindex(columns=df.columns)
 
     return result_df, merge_reports
 

@@ -1,10 +1,21 @@
 import os
 import sys
 import csv
+import time
 import pandas as pd
 from dotenv import load_dotenv
 from supabase import Client, create_client
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional, Tuple
+
+
+COMPANY_NAME_BUCKETS: List[Tuple[Optional[str], Optional[str], Optional[str]]] = [
+    ("", None, None),
+    *[
+        (None, chr(codepoint), chr(codepoint + 1))
+        for codepoint in range(ord(" "), ord("~"))
+    ],
+    (None, "~", None),
+]
 
 
 def get_client() -> Client:
@@ -38,6 +49,89 @@ def fetch_all_data(client: Client, table: str, page_size: int, max_pages: int) -
     df = pd.DataFrame(all_rows)
     print(f"Total rows fetched: {len(df)}")
     return df
+
+
+def fetch_entire_table(client: Client, table: str, page_size: int) -> pd.DataFrame:
+    """Fetch every row from a Supabase table into memory."""
+    all_rows: List[Dict] = []
+
+    print(f"Fetching entire table from: {table}")
+
+    page = 0
+    for exact_value, lower_bound, upper_bound in COMPANY_NAME_BUCKETS:
+        bucket_label = describe_company_name_bucket(
+            exact_value=exact_value,
+            lower_bound=lower_bound,
+            upper_bound=upper_bound,
+        )
+        print(f"Scanning bucket: {bucket_label}")
+        bucket_offset = 0
+        while True:
+            query = client.table(table).select("*")
+            if exact_value is not None:
+                query = query.eq("companyName", exact_value)
+            else:
+                if lower_bound is not None:
+                    query = query.gte("companyName", lower_bound)
+                if upper_bound is not None:
+                    query = query.lt("companyName", upper_bound)
+
+            response = execute_with_retries(
+                lambda: query.range(bucket_offset, bucket_offset + page_size - 1).execute(),
+                context=(
+                    f"{bucket_label} offset {bucket_offset}-"
+                    f"{bucket_offset + page_size - 1}"
+                ),
+            )
+            rows = response.data or []
+
+            if not rows:
+                break
+
+            page += 1
+            all_rows.extend(rows)
+            print(
+                f"Page {page}: fetched {len(rows)} rows "
+                f"(total: {len(all_rows):,})"
+            )
+
+            if len(rows) < page_size:
+                break
+
+            bucket_offset += page_size
+
+    df = pd.DataFrame(all_rows)
+    print(f"Total rows fetched: {len(df):,}")
+    return df
+
+
+def describe_company_name_bucket(
+    exact_value: Optional[str],
+    lower_bound: Optional[str],
+    upper_bound: Optional[str],
+) -> str:
+    if exact_value is not None:
+        return f"companyName == {repr(exact_value)}"
+    return f"companyName in [{repr(lower_bound)}, {repr(upper_bound)})"
+
+
+def execute_with_retries(operation, context: str, attempts: int = 3):
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation()
+        except Exception as exc:
+            last_error = exc
+            if attempt == attempts:
+                break
+            print(
+                f"Retrying after error on {context} "
+                f"(attempt {attempt}/{attempts}): {exc}"
+            )
+            time.sleep(attempt)
+
+    raise last_error
 
 
 def stream_all_data_to_csv(client: Client, table: str, page_size: int,
