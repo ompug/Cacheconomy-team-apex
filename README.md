@@ -64,6 +64,7 @@ Create a `.env` file in the project root with the following variables:
 ```
 SUPABASE_URL=your_supabase_project_url
 SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_secret
+SUPABASE_DB_URL=postgresql://USER:PASSWORD@HOST:5432/postgres
 SUPABASE_TABLE=your_table_name
 SUPABASE_SOURCE_TABLE=companies_data
 SUPABASE_DEST_TABLE=Cleaned_companies_data
@@ -71,33 +72,43 @@ SUPABASE_PAGE_SIZE=1000
 SUPABASE_MAX_PAGES=3
 ```
 
-- `SUPABASE_URL`: Your Supabase project URL.
+- `SUPABASE_URL`: Your Supabase project URL (used by the small REST helper scripts).
 - `SUPABASE_SERVICE_ROLE_KEY`: Service role secret key (for admin/server-side scripts only).
+- `SUPABASE_DB_URL`: Direct Postgres connection string used by the cleaning pipeline. Use either:
+  - the **direct connection** on port `5432`, or
+  - the **Supavisor session pooler** on port `5432` (recommended if your network does not support IPv6).
+  Format: `postgresql://postgres.<project-ref>:<password>@<host>:5432/postgres`. Get this string from the Supabase dashboard under *Project Settings → Database → Connection string*.
 - `SUPABASE_TABLE`: The table to query for the original single-table scripts.
 - `SUPABASE_SOURCE_TABLE`: Source table for the Supabase-to-Supabase cleaning pipeline.
 - `SUPABASE_DEST_TABLE`: Destination table for cleaned output. This table is replaced on each pipeline run.
-- `SUPABASE_PAGE_SIZE`: Number of rows to fetch per page (for pagination).
-- `SUPABASE_MAX_PAGES`: Maximum number of pages to fetch in one run.
+- `SUPABASE_PAGE_SIZE`: Number of rows to fetch per page for the legacy REST helpers.
+- `SUPABASE_MAX_PAGES`: Maximum number of pages to fetch in one run for the legacy REST helpers.
 
 ## Supabase Cleaning Pipeline
 
-Use the new pipeline script to read raw data from one Supabase table, merge duplicates in memory, and write the cleaned result to another table:
+Use the cleaning pipeline script to read raw data from one Supabase table, merge duplicates in memory, and write the cleaned result to another table:
 
 ```bash
 python sync_cleaned_pipeline.py
 ```
 
-This pipeline:
+This pipeline runs as a **direct Postgres ETL** instead of going through the Supabase REST API, so it can handle very large source tables without PostgREST statement timeouts.
 
-- Fetches all rows from `SUPABASE_SOURCE_TABLE` (or falls back to `SUPABASE_TABLE` if needed).
-- Reuses the duplicate-merging logic from `merge_duplicates.py`.
-- Clears existing rows in `SUPABASE_DEST_TABLE`.
-- Inserts the cleaned rows back into Supabase in batches.
+What it does, end to end:
 
-The destination table should accept the cleaned schema. Metadata columns such as `id`, `created_at`, and `updated_at` are not sent during insert so Supabase can generate fresh values.
+1. Connects to Postgres using `SUPABASE_DB_URL` and disables `statement_timeout` for the ETL session only.
+2. Streams every row from `SUPABASE_SOURCE_TABLE` using a server-side cursor (no offset paging, no REST API).
+3. Runs the duplicate-merging logic from `merge_duplicates.py` in pandas.
+4. Bulk-loads cleaned rows into a temporary staging table with Postgres `COPY`.
+5. Atomically refreshes `SUPABASE_DEST_TABLE` inside a single transaction: `TRUNCATE` then `INSERT ... SELECT` from staging. The destination is never left half-written.
 
-The replace-all step clears destination rows using the configured primary business key (`dunsNumber`). Rows in `SUPABASE_DEST_TABLE` without a `dunsNumber` value are not part of that delete filter.
+Notes and requirements:
 
-Because this workflow uses the service role key and replaces the cleaned table on each run, only use it in trusted server-side or local development contexts.
+- The destination table is fully replaced on every successful run.
+- Metadata columns (`id`, `created_at`, `updated_at`) are not copied so Supabase can regenerate them.
+- Only columns that exist in **both** the merged data and the destination table are loaded; merged columns missing from the destination are skipped (and printed in the run summary).
+- Run this from a machine that can reach the Supabase database (direct connection requires IPv6; otherwise use the Supavisor session pooler on port 5432).
+- `psycopg` (installed via `requirements.txt` as `psycopg[binary]`) is required.
+- Because the script uses a privileged connection and replaces the cleaned table on each run, only use it in trusted server-side or local development contexts.
 
 **Never commit your .env file or secret keys to version control.**
