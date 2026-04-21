@@ -112,3 +112,7 @@ Notes and requirements:
 - Because the script uses a privileged connection and replaces the cleaned table on each run, only use it in trusted server-side or local development contexts.
 
 **Never commit your .env file or secret keys to version control.**
+
+## Recent Work Log
+
+A second-pass aggressive multi-pass dedupe workflow was added and loaded into `v2_Cleaned_companies_data` for comparison against the original `Cleaned_companies_data` output. The v2 run caught many more candidate duplicates, but evaluation showed it is likely too aggressive for final production use, so treat it as an analysis/comparison result unless the matching rules are tightened further.

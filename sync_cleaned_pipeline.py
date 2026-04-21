@@ -21,8 +21,9 @@ from dotenv import load_dotenv
 from merge_duplicates import (
     EXCLUDE_FROM_MERGE,
     MATCH_FIELDS,
+    MATCH_STRATEGY,
     PRIMARY_KEY,
-    merge_all_duplicates,
+    merge_all_duplicates_with_stats,
 )
 
 
@@ -250,49 +251,76 @@ def main() -> int:
         print(f"Destination table: {destination_table}")
         print(f"Read chunk size:   {READ_CHUNK_SIZE:,}")
         print(f"Match fields:      {', '.join(MATCH_FIELDS)}")
+        print(f"Match strategy:    {MATCH_STRATEGY}")
         print(f"Primary key:       {PRIMARY_KEY}")
 
-        connection = open_connection(db_url)
-
+        read_connection = open_connection(db_url)
         try:
             source_df = fetch_source_dataframe(
-                connection=connection,
+                connection=read_connection,
                 source_table=source_table,
                 chunk_size=READ_CHUNK_SIZE,
             )
-            source_count = len(source_df)
+        finally:
+            read_connection.close()
 
-            destination_columns = fetch_table_columns(connection, destination_table)
-            if not destination_columns:
-                raise RuntimeError(
-                    f"Destination table {destination_table} has no columns "
-                    f"or was not found in schema 'public'."
-                )
+        source_count = len(source_df)
 
-            if source_count == 0:
+        if source_count == 0:
+            write_connection = open_connection(db_url)
+            try:
+                destination_columns = fetch_table_columns(write_connection, destination_table)
+                if not destination_columns:
+                    raise RuntimeError(
+                        f"Destination table {destination_table} has no columns "
+                        f"or was not found in schema 'public'."
+                    )
+
                 print("Source table is empty. Truncating destination table.")
-                with connection.cursor() as cursor:
+                with write_connection.cursor() as cursor:
                     cursor.execute(
                         sql.SQL("TRUNCATE TABLE {}").format(
                             sql.Identifier(destination_table)
                         )
                     )
-                connection.commit()
+                write_connection.commit()
                 print("Success: destination cleared, no cleaned rows to write.")
                 return 0
+            finally:
+                write_connection.close()
 
-            print("\nFinding and merging duplicates...")
-            merged_df, merge_reports = merge_all_duplicates(
-                source_df,
-                MATCH_FIELDS,
-                PRIMARY_KEY,
-                EXCLUDE_FROM_MERGE,
+        print("\nFinding and merging duplicates...")
+        merged_df, merge_reports, match_stats = merge_all_duplicates_with_stats(
+            source_df,
+            MATCH_FIELDS,
+            PRIMARY_KEY,
+            EXCLUDE_FROM_MERGE,
+        )
+        merged_count = len(merged_df)
+
+        print(f"\nMerge complete: {source_count:,} -> {merged_count:,} rows")
+        print(f"Eliminated {source_count - merged_count:,} duplicate rows")
+        print(f"Duplicate groups found: {len(merge_reports):,}")
+        print(
+            f"Duplicate rows involved: "
+            f"{match_stats.get('rows_involved', 0):,}"
+        )
+        for pass_stat in match_stats.get("pass_stats", []):
+            if pass_stat["raw_groups"] == 0:
+                continue
+            print(
+                f"  - {pass_stat['name']}: {pass_stat['rows_matched']:,} rows "
+                f"in {pass_stat['raw_groups']:,} raw groups"
             )
-            merged_count = len(merged_df)
 
-            print(f"\nMerge complete: {source_count:,} -> {merged_count:,} rows")
-            print(f"Eliminated {source_count - merged_count:,} duplicate rows")
-            print(f"Duplicate groups found: {len(merge_reports):,}")
+        write_connection = open_connection(db_url)
+        try:
+            destination_columns = fetch_table_columns(write_connection, destination_table)
+            if not destination_columns:
+                raise RuntimeError(
+                    f"Destination table {destination_table} has no columns "
+                    f"or was not found in schema 'public'."
+                )
 
             target_columns = select_destination_columns(
                 merged_columns=list(merged_df.columns),
@@ -320,7 +348,7 @@ def main() -> int:
 
             copy_buffer = dataframe_to_copy_buffer(merged_df, target_columns)
             inserted_count, destination_count = run_replace_all_in_transaction(
-                connection=connection,
+                connection=write_connection,
                 destination_table=destination_table,
                 columns=target_columns,
                 copy_buffer=copy_buffer,
@@ -332,7 +360,7 @@ def main() -> int:
             print("Success: cleaned data synced to Supabase via direct Postgres.")
             return 0
         finally:
-            connection.close()
+            write_connection.close()
     except Exception as exc:
         print(f"Sync failed: {exc}")
         return 1
