@@ -1,11 +1,21 @@
 """
-Duplicate Identification Script for Supabase Business Data
-Identifies exact duplicates across ALL fields in the companies_data table.
+Duplicate Identification Script for Supabase Business Data.
+
+This script is now aligned with the production merge logic. It still reports
+strict exact duplicates for reference, but its main summary is based on the
+same aggressive multi-pass matcher used by the cleaning ETL.
 """
 
 import pandas as pd
 import sys
 from datetime import datetime
+
+from merge_duplicates import (
+    MATCH_FIELDS,
+    MATCH_STRATEGY,
+    build_match_features,
+    find_multipass_duplicates,
+)
 
 # Columns to exclude from duplicate comparison
 # (these fields can legitimately have the same values across different records)
@@ -62,8 +72,14 @@ def analyze_field_duplicates(df: pd.DataFrame) -> dict:
     return field_stats
 
 
-def generate_summary_report(df: pd.DataFrame, exact_duplicates: pd.DataFrame,
-                           field_stats: dict, exclude_cols: list = None) -> str:
+def generate_summary_report(
+    df: pd.DataFrame,
+    exact_duplicates: pd.DataFrame,
+    multi_pass_duplicates: pd.DataFrame,
+    multi_pass_stats: dict,
+    field_stats: dict,
+    exclude_cols: list = None,
+) -> str:
     """Generate a text summary report."""
     report = []
     report.append("=" * 70)
@@ -87,6 +103,13 @@ def generate_summary_report(df: pd.DataFrame, exact_duplicates: pd.DataFrame,
     report.append(f"Total rows in dataset:        {len(df):,}")
     report.append(f"Total columns:                {len(df.columns)}")
     report.append(f"Exact duplicate rows:         {len(exact_duplicates):,}")
+    report.append(f"Multi-pass duplicate rows:    {len(multi_pass_duplicates):,}")
+    report.append(f"Multi-pass duplicate groups:  {multi_pass_stats.get('group_count', 0):,}")
+    report.append(
+        f"Estimated rows eliminated:    "
+        f"{len(multi_pass_duplicates) - multi_pass_stats.get('group_count', 0):,}"
+    )
+    report.append(f"Match strategy:               {MATCH_STRATEGY}")
 
     if len(exact_duplicates) > 0:
         num_groups = exact_duplicates['duplicate_group'].nunique()
@@ -94,6 +117,19 @@ def generate_summary_report(df: pd.DataFrame, exact_duplicates: pd.DataFrame,
         report.append(f"Duplicate percentage:         {len(exact_duplicates) / len(df) * 100:.2f}%")
     else:
         report.append("No exact duplicates found (all rows are unique)")
+
+    report.append("")
+    report.append("=" * 70)
+    report.append("MULTI-PASS BREAKDOWN")
+    report.append("-" * 70)
+    report.append(f"{'Pass':<24} {'Rows':>12} {'Groups':>12}")
+    report.append("-" * 70)
+
+    for pass_stat in multi_pass_stats.get("pass_stats", []):
+        report.append(
+            f"{pass_stat['name']:<24} {pass_stat['rows_matched']:>12,} "
+            f"{pass_stat['raw_groups']:>12,}"
+        )
 
     report.append("")
     report.append("=" * 70)
@@ -135,6 +171,7 @@ def generate_summary_report(df: pd.DataFrame, exact_duplicates: pd.DataFrame,
 def main() -> int:
     input_file = "fetched_data_sample.csv"
     duplicates_file = "duplicate_rows.csv"
+    multi_pass_duplicates_file = "multipass_duplicate_rows.csv"
     summary_file = "duplicate_summary.txt"
 
     try:
@@ -152,13 +189,28 @@ def main() -> int:
             num_groups = exact_duplicates['duplicate_group'].nunique()
             print(f"These form {num_groups} duplicate groups")
 
+        print("\nFinding duplicates with the production multi-pass matcher...")
+        multi_pass_duplicates, multi_pass_stats = find_multipass_duplicates(df)
+        print(
+            f"Found {len(multi_pass_duplicates)} multi-pass duplicate rows "
+            f"in {multi_pass_stats.get('group_count', 0):,} groups"
+        )
+        print(f"Match strategy: {MATCH_STRATEGY}")
+
         # Analyze per-field duplicates
         print("\nAnalyzing per-field duplicate values...")
         field_stats = analyze_field_duplicates(df)
 
         # Generate and save summary report
         print("\nGenerating summary report...")
-        report = generate_summary_report(df, exact_duplicates, field_stats, exclude_cols=EXCLUDE_COLUMNS)
+        report = generate_summary_report(
+            df,
+            exact_duplicates,
+            multi_pass_duplicates,
+            multi_pass_stats,
+            field_stats,
+            exclude_cols=EXCLUDE_COLUMNS,
+        )
 
         with open(summary_file, 'w') as f:
             f.write(report)
@@ -170,6 +222,15 @@ def main() -> int:
             print(f"Duplicate rows saved to: {duplicates_file}")
         else:
             print("No duplicate rows to export.")
+
+        if len(multi_pass_duplicates) > 0:
+            multi_pass_duplicates.to_csv(multi_pass_duplicates_file, index=False)
+            print(
+                f"Multi-pass duplicate rows saved to: "
+                f"{multi_pass_duplicates_file}"
+            )
+        else:
+            print("No multi-pass duplicate rows to export.")
 
         # Print report to console
         print("\n" + report)
