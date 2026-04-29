@@ -24,6 +24,7 @@ from merge_duplicates import (
     PRIMARY_KEY,
     merge_all_duplicates,
 )
+from data_cleaning import standardize_dataframe
 
 
 READ_CHUNK_SIZE = 50_000
@@ -62,6 +63,37 @@ def open_connection(db_url: str) -> psycopg.Connection:
         cursor.execute("SET idle_in_transaction_session_timeout = 0")
     connection.commit()
     return connection
+
+
+def ensure_destination_table(
+    connection: psycopg.Connection,
+    source_table: str,
+    destination_table: str,
+) -> List[str]:
+    """Create the destination table from the source schema if it doesn't exist."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = %s",
+            (destination_table,),
+        )
+        exists = cursor.fetchone() is not None
+
+    if not exists:
+        print(f"Destination table '{destination_table}' not found — creating it...")
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("CREATE TABLE {} (LIKE {} INCLUDING DEFAULTS)").format(
+                    sql.Identifier(destination_table),
+                    sql.Identifier(source_table),
+                )
+            )
+        connection.commit()
+        print(f"Created '{destination_table}' from '{source_table}' schema.")
+    else:
+        print(f"Destination table '{destination_table}' already exists.")
+
+    return fetch_table_columns(connection, destination_table)
 
 
 def fetch_table_columns(connection: psycopg.Connection, table_name: str) -> List[str]:
@@ -262,7 +294,13 @@ def main() -> int:
             )
             source_count = len(source_df)
 
-            destination_columns = fetch_table_columns(connection, destination_table)
+            print("\nStandardizing columns...")
+            source_df = standardize_dataframe(source_df)
+            print("Standardization complete.")
+
+            destination_columns = ensure_destination_table(
+                connection, source_table, destination_table
+            )
             if not destination_columns:
                 raise RuntimeError(
                     f"Destination table {destination_table} has no columns "
