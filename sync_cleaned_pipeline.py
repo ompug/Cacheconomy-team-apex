@@ -7,7 +7,6 @@ logic in pandas, bulk-loads cleaned rows into a staging table with COPY, and
 atomically refreshes the destination table inside a single transaction.
 """
 
-import io
 import os
 import sys
 from datetime import date, datetime
@@ -28,7 +27,7 @@ from data_cleaning import standardize_dataframe
 
 
 READ_CHUNK_SIZE = 50_000
-COPY_NULL_SENTINEL = "__NULL__"
+WRITE_BATCH_SIZE = 1_000
 STAGING_TABLE_NAME = "_cleaned_companies_data_stage"
 
 
@@ -158,7 +157,7 @@ def select_destination_columns(
     ]
 
 
-def normalize_value_for_copy(value: Any) -> Any:
+def normalize_value_for_db(value: Any) -> Any:
     if value is None:
         return None
     if isinstance(value, float) and pd.isna(value):
@@ -175,32 +174,27 @@ def normalize_value_for_copy(value: Any) -> Any:
     return value
 
 
-def dataframe_to_copy_buffer(
-    dataframe: pd.DataFrame, columns: List[str]
-) -> io.StringIO:
-    buffer = io.StringIO()
-    projected = dataframe[columns].copy()
-    for column in columns:
-        projected[column] = projected[column].map(normalize_value_for_copy)
-    projected.to_csv(
-        buffer,
-        index=False,
-        header=False,
-        na_rep=COPY_NULL_SENTINEL,
-        lineterminator="\n",
-    )
-    buffer.seek(0)
-    return buffer
+def iter_insert_batches(
+    dataframe: pd.DataFrame,
+    columns: List[str],
+    batch_size: int = WRITE_BATCH_SIZE,
+):
+    for start in range(0, len(dataframe), batch_size):
+        batch_df = dataframe.iloc[start : start + batch_size][columns]
+        rows = [
+            tuple(normalize_value_for_db(value) for value in row)
+            for row in batch_df.itertuples(index=False, name=None)
+        ]
+        yield start, len(rows), rows
 
 
 def run_replace_all_in_transaction(
     connection: psycopg.Connection,
     destination_table: str,
     columns: List[str],
-    copy_buffer: io.StringIO,
+    merged_df: pd.DataFrame,
     expected_row_count: int,
 ) -> Tuple[int, int]:
-    quoted_columns = ", ".join(f'"{column}"' for column in columns)
     staging_table = STAGING_TABLE_NAME
 
     with connection.cursor() as cursor:
@@ -220,15 +214,17 @@ def run_replace_all_in_transaction(
             )
         )
 
-        copy_sql = sql.SQL(
-            "COPY {} ({}) FROM STDIN WITH (FORMAT CSV, NULL {})"
-        ).format(
+        insert_sql = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
             staging_identifier,
             column_list_sql,
-            sql.Literal(COPY_NULL_SENTINEL),
+            sql.SQL(", ").join(sql.Placeholder() for _ in columns),
         )
-        with cursor.copy(copy_sql) as copy:
-            copy.write(copy_buffer.read())
+        for batch_start, batch_size, rows in iter_insert_batches(merged_df, columns):
+            cursor.executemany(insert_sql, rows)
+            print(
+                f"Inserted batch of {batch_size:,} rows into staging "
+                f"(total prepared: {batch_start + batch_size:,})"
+            )
 
         cursor.execute(
             sql.SQL("SELECT COUNT(*) FROM {}").format(staging_identifier)
@@ -356,12 +352,11 @@ def main() -> int:
 
             print(f"Loading {len(target_columns)} columns into destination.")
 
-            copy_buffer = dataframe_to_copy_buffer(merged_df, target_columns)
             inserted_count, destination_count = run_replace_all_in_transaction(
                 connection=connection,
                 destination_table=destination_table,
                 columns=target_columns,
-                copy_buffer=copy_buffer,
+                merged_df=merged_df,
                 expected_row_count=merged_count,
             )
 

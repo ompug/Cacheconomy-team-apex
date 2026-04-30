@@ -113,6 +113,54 @@ Notes and requirements:
 
 **Never commit your .env file or secret keys to version control.**
 
+## Full Pipeline Runner
+
+For the end-to-end workflow that exports the raw table, produces the local analysis artifacts, and then loads the final merged result into Supabase, use:
+
+```bash
+python run_full_supabase_pipeline.py
+```
+
+This runner:
+
+1. Checks Supabase API connectivity against the raw source table.
+2. Exports the full raw dataset to `fetched_data_sample.csv`.
+3. Standardizes the raw export into `cleaned_data.csv`.
+4. Generates `merged_data.csv` and `merge_report.txt`.
+5. Generates duplicate-analysis outputs such as `duplicate_summary.txt`.
+6. Loads the merged final dataset into `SUPABASE_DEST_TABLE`.
+
+The final load uses committed batch inserts so the result can still be written reliably when a single large direct sync is unstable on the Supabase connection.
+
+## Merge Report Summary
+
+The latest generated merge report is stored in `merge_report.txt`.
+
+Summary from the latest full run:
+
+- Source rows analyzed: `787,564`
+- Merged rows produced: `414,814`
+- Rows eliminated as duplicates: `372,750`
+- Duplicate groups found: `209,394`
+
+Selected match-pass totals from the report:
+
+- `duns_exact`: `338,605` rows across `139,817` groups
+- `SOSID_exact`: `105,622` rows across `43,752` groups
+- `recID_exact`: `75,431` rows across `30,083` groups
+- `domain_address_zip`: `153,722` rows across `57,245` groups
+- `phone_address_zip`: `179,336` rows across `67,817` groups
+- `name_address_zip`: `475,678` rows across `188,181` groups
+- `name_address`: `475,945` rows across `188,200` groups
+- `name_address_number_zip`: `478,926` rows across `187,342` groups
+
+## Latest Final Output
+
+The latest successful full run loaded the merged output into the Supabase table `final_cleaned_companies`.
+
+- Final verified row count in Supabase: `414,814`
+- Verification matched the local `merged_data.csv` row count
+
 ## Recent Work Log
 
 A second-pass aggressive multi-pass dedupe workflow was added and loaded into `v2_Cleaned_companies_data` for comparison against the original `Cleaned_companies_data` output. The v2 run caught many more candidate duplicates, but evaluation showed it is likely too aggressive for final production use, so treat it as an analysis/comparison result unless the matching rules are tightened further.
